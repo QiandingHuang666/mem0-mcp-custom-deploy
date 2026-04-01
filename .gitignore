@@ -1,0 +1,60 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# mem0 data
+storage/
+snapshots/
+
+# Keys
+keys/
+
+# Env
+.env
+
+# Legacy clone
+mem0-mcp/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+
+# Old files
+mcp_server.py
+main.py
+test_mem0.py
+
+# Runtime data
+storage/
+snapshots/
+.qdrant-initialized
+
+# Keys & secrets  
+.env
+keys/
+
+# Legacy clone
+mem0-mcp/
+
+# Old files (replaced by src/)
+mcp_server.py
+main.py
+test_mem0.py
+
+# Design docs (internal)
+docs/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store

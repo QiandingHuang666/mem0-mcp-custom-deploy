@@ -1,0 +1,20 @@
+[Unit]
+Description=Mem0 Stack (Ollama + Qdrant + MCP Server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=hqd
+Group=hqd
+EnvironmentFile=-/etc/mem0-stack.env
+ExecStart=/home/hqd/app/mem0-project/mem0-stack.sh
+WorkingDirectory=/home/hqd/app/mem0-project
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mem0-stack
+
+[Install]
+WantedBy=multi-user.target
