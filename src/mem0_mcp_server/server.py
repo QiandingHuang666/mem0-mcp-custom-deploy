@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from typing import Annotated, Any, Dict, Optional
 
 from dotenv import load_dotenv
@@ -79,14 +80,18 @@ def _with_default_filters(
 
 def _mem0_call(func, *args, **kwargs) -> str:
     """Call a LocalMemoryAdapter method and serialize the result as JSON."""
+    t0 = time.perf_counter()
     try:
         result = func(*args, **kwargs)
     except Exception as exc:
-        logger.error("Memory call failed: %s", exc)
+        dt = time.perf_counter() - t0
+        logger.error("Memory call failed (%.3fs): %s", dt, exc)
         return json.dumps(
             {"error": str(exc)},
             ensure_ascii=False,
         )
+    dt = time.perf_counter() - t0
+    logger.info("mem0_call %s took %.3fs", func.__name__ if hasattr(func, '__name__') else func, dt)
     return json.dumps(result, ensure_ascii=False)
 
 
@@ -100,8 +105,8 @@ def create_server() -> FastMCP:
 
     kwargs: Dict[str, Any] = {
         "name": "mem0",
-        "stateless_http": True,
-        "json_response": True,
+        "stateless_http": False,
+        "json_response": False,
         "host": os.getenv("MCP_HOST", "0.0.0.0"),
         "port": int(os.getenv("MCP_PORT", "8081")),
     }
