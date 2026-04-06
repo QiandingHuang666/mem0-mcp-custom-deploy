@@ -17,7 +17,8 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import Field
 
-from .auth_server import InMemoryOAuthProvider
+from .device_tokens import InMemoryDeviceTokenStore
+from .identity import DeviceIdentity, resolve_request_identity
 from .local_memory import LocalMemoryAdapter
 from .schemas import (
     AddMemoryArgs,
@@ -47,6 +48,7 @@ ENV_MCP_SERVER_URL = os.getenv("MCP_SERVER_URL", "http://localhost:8081")
 # ---------------------------------------------------------------------------
 
 _memory_adapter: LocalMemoryAdapter | None = None
+_device_token_store: InMemoryDeviceTokenStore | None = None
 
 
 def _get_adapter() -> LocalMemoryAdapter:
@@ -54,6 +56,46 @@ def _get_adapter() -> LocalMemoryAdapter:
     if _memory_adapter is None:
         _memory_adapter = LocalMemoryAdapter()
     return _memory_adapter
+
+
+def _get_device_token_store() -> InMemoryDeviceTokenStore:
+    global _device_token_store
+    if _device_token_store is None:
+        _device_token_store = InMemoryDeviceTokenStore()
+    return _device_token_store
+
+
+def is_memory_adapter_initialized() -> bool:
+    """Report whether the shared adapter has been initialized."""
+    return _memory_adapter is not None
+
+
+def _resolve_context_identity(
+    ctx: Context | None,
+    token_store: InMemoryDeviceTokenStore,
+    default_user_id: str,
+) -> DeviceIdentity:
+    """Resolve caller identity from Bearer token when available.
+
+    Falls back to ``default_user_id`` when there is no request context, no
+    Authorization header, or the token is invalid.
+    """
+    if ctx is None:
+        return resolve_request_identity(None, default_user_id)
+
+    try:
+        request = ctx.request_context.request
+        headers = getattr(request, "headers", None)
+        auth_header = headers.get("authorization") if headers else None
+    except Exception:
+        auth_header = None
+
+    if not auth_header or not auth_header.lower().startswith("bearer "):
+        return resolve_request_identity(None, default_user_id)
+
+    token = auth_header.split(" ", 1)[1].strip()
+    claims = token_store.verify_token(token)
+    return resolve_request_identity(claims, default_user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -76,6 +118,47 @@ def _with_default_filters(
             raise ValueError("filters['AND'] must be a list when present.")
         and_list.insert(0, {"user_id": default_user_id})
     return filters
+
+
+def _with_enforced_user_filter(
+    user_id: str,
+    filters: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Force all searches/lists to stay within the authenticated user's scope.
+
+    Unlike `_with_default_filters`, this does not merely inject a user_id when one
+    is missing — it wraps any caller-supplied filters under a top-level AND with the
+    authenticated `user_id`, preventing the caller from widening scope to other users.
+    """
+    if not filters:
+        return {"AND": [{"user_id": user_id}]}
+
+    normalized = filters
+    if not any(key in normalized for key in ("AND", "OR", "NOT")):
+        normalized = {"AND": [normalized]}
+
+    return {"AND": [{"user_id": user_id}, normalized]}
+
+
+def _memory_belongs_to_user(memory: Any, user_id: str) -> bool:
+    """Check whether a retrieved memory belongs to the resolved user scope."""
+    if not isinstance(memory, dict):
+        return False
+    return memory.get("user_id") == user_id
+
+
+def _scoped_memory_lookup(
+    adapter: LocalMemoryAdapter,
+    memory_id: str,
+    identity: DeviceIdentity,
+) -> Dict[str, Any] | None:
+    """Fetch a memory by id and reject cross-user access."""
+    memory = adapter.get(memory_id)
+    if memory is None:
+        return None
+    if not _memory_belongs_to_user(memory, identity.user_id):
+        raise PermissionError("memory_not_in_user_scope")
+    return memory
 
 
 def _mem0_call(func, *args, **kwargs) -> str:
@@ -101,7 +184,7 @@ def _mem0_call(func, *args, **kwargs) -> str:
 
 
 def create_server() -> FastMCP:
-    """Create a FastMCP server with optional OAuth 2.1 authentication."""
+    """Create a FastMCP server using device-token authentication semantics."""
 
     kwargs: Dict[str, Any] = {
         "name": "mem0",
@@ -111,21 +194,7 @@ def create_server() -> FastMCP:
         "port": int(os.getenv("MCP_PORT", "8081")),
     }
 
-    if not ENV_OAUTH_DISABLED:
-        from pydantic import AnyHttpUrl
-
-        from mcp.server.auth.settings import AuthSettings
-
-        provider = InMemoryOAuthProvider()
-        kwargs["auth_server_provider"] = provider
-        kwargs["auth"] = AuthSettings(
-            issuer_url=AnyHttpUrl(ENV_OAUTH_ISSUER_URL),
-            resource_server_url=AnyHttpUrl(ENV_MCP_SERVER_URL),
-        )
-        logger.info("OAuth 2.1 authentication enabled (issuer=%s)", ENV_OAUTH_ISSUER_URL)
-    else:
-        logger.info("OAuth authentication disabled (OAUTH_DISABLED=true)")
-
+    logger.info("Device token authentication enabled at application layer")
     server = FastMCP(**kwargs)
 
     # ------------------------------------------------------------------
@@ -183,11 +252,11 @@ def create_server() -> FastMCP:
     ) -> str:
         """Write durable information to Mem0."""
 
-        default_user = ENV_DEFAULT_USER_ID
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         args = AddMemoryArgs(
             text=text,
             messages=[ToolMessage(**msg) for msg in messages] if messages else None,
-            user_id=user_id if user_id else (default_user if not (agent_id or run_id) else None),
+            user_id=identity.user_id if not (agent_id or run_id) else None,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
@@ -254,7 +323,7 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """Semantic search against existing memories."""
 
-        default_user = ENV_DEFAULT_USER_ID
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         args = SearchMemoriesArgs(
             query=query,
             filters=filters,
@@ -262,7 +331,7 @@ user_id is automatically added to filters if not provided.
             enable_graph=enable_graph or False,
         )
         payload = args.model_dump(exclude_none=True)
-        payload["filters"] = _with_default_filters(default_user, payload.get("filters"))
+        payload["filters"] = _with_enforced_user_filter(identity.user_id, payload.get("filters"))
         # Remove args that LocalMemoryAdapter.search does not accept
         payload.pop("enable_graph", None)
 
@@ -308,7 +377,7 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """List memories via structured filters or pagination."""
 
-        default_user = ENV_DEFAULT_USER_ID
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         args = GetMemoriesArgs(
             filters=filters,
             page=page,
@@ -316,7 +385,7 @@ user_id is automatically added to filters if not provided.
             enable_graph=enable_graph or False,
         )
         payload = args.model_dump(exclude_none=True)
-        payload["filters"] = _with_default_filters(default_user, payload.get("filters"))
+        payload["filters"] = _with_enforced_user_filter(identity.user_id, payload.get("filters"))
         # Remove args that LocalMemoryAdapter.get_all does not accept
         payload.pop("enable_graph", None)
 
@@ -347,9 +416,9 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """Bulk-delete every memory in the confirmed scope."""
 
-        default_user = ENV_DEFAULT_USER_ID
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         args = DeleteAllArgs(
-            user_id=user_id or default_user,
+            user_id=identity.user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
@@ -362,10 +431,11 @@ user_id is automatically added to filters if not provided.
 
     @server.tool(description="List which users/agents/apps/runs currently hold memories.")
     def list_entities(ctx: Context | None = None) -> str:
-        """List users/agents/apps/runs with stored memories."""
+        """List entities only for the resolved caller scope."""
 
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         adapter = _get_adapter()
-        return _mem0_call(adapter.users)
+        return _mem0_call(adapter.users, user_id=identity.user_id)
 
     @server.tool(description="Fetch a single memory once you know its memory_id.")
     def get_memory(
@@ -374,8 +444,9 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """Retrieve a single memory once the user has picked an exact ID."""
 
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         adapter = _get_adapter()
-        return _mem0_call(adapter.get, memory_id)
+        return _mem0_call(_scoped_memory_lookup, adapter, memory_id, identity)
 
     @server.tool(description="Overwrite an existing memory's text.")
     def update_memory(
@@ -385,7 +456,13 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """Overwrite an existing memory's text after the user confirms the exact memory_id."""
 
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         adapter = _get_adapter()
+        lookup_result = _mem0_call(_scoped_memory_lookup, adapter, memory_id, identity)
+        if json.loads(lookup_result) is None:
+            return lookup_result
+        if "\"error\"" in lookup_result:
+            return lookup_result
         return _mem0_call(adapter.update, memory_id=memory_id, text=text)
 
     @server.tool(description="Delete one memory after the user confirms its memory_id.")
@@ -395,35 +472,42 @@ user_id is automatically added to filters if not provided.
     ) -> str:
         """Delete a memory once the user explicitly confirms the memory_id to remove."""
 
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         adapter = _get_adapter()
+        lookup_result = _mem0_call(_scoped_memory_lookup, adapter, memory_id, identity)
+        if json.loads(lookup_result) is None:
+            return lookup_result
+        if "\"error\"" in lookup_result:
+            return lookup_result
         return _mem0_call(adapter.delete, memory_id)
 
     @server.tool(
-        description="Remove a user/agent/app/run record entirely (and cascade-delete its memories)."
+        description="Remove the resolved user/agent/run scope entirely (and cascade-delete its memories)."
     )
     def delete_entities(
         user_id: Annotated[
             Optional[str],
-            Field(default=None, description="Delete this user and its memories."),
+            Field(default=None, description="Ignored; deletion is always scoped to the resolved user."),
         ] = None,
         agent_id: Annotated[
             Optional[str],
-            Field(default=None, description="Delete this agent and its memories."),
+            Field(default=None, description="Optional agent scope within the resolved user."),
         ] = None,
         app_id: Annotated[
             Optional[str],
-            Field(default=None, description="Delete this app and its memories."),
+            Field(default=None, description="Optional app scope (ignored by local memory backend)."),
         ] = None,
         run_id: Annotated[
             Optional[str],
-            Field(default=None, description="Delete this run and its memories."),
+            Field(default=None, description="Optional run scope within the resolved user."),
         ] = None,
         ctx: Context | None = None,
     ) -> str:
-        """Delete a user/agent/app/run (and its memories) once the user confirms the scope."""
+        """Delete only entities within the resolved user's scope."""
 
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
         args = DeleteEntitiesArgs(
-            user_id=user_id,
+            user_id=identity.user_id,
             agent_id=agent_id,
             app_id=app_id,
             run_id=run_id,
@@ -441,6 +525,34 @@ user_id is automatically added to filters if not provided.
 
         adapter = _get_adapter()
         return _mem0_call(adapter.delete_users, **payload)
+
+    # ------------------------------------------------------------------
+    # Identity & Capability tools
+    # ------------------------------------------------------------------
+
+    @server.tool(description="Return the identity of the current caller.")
+    def whoami(ctx: Context | None = None) -> str:
+        """Return the resolved identity (user_id, device_id) of the caller."""
+        identity = _resolve_context_identity(ctx, _get_device_token_store(), ENV_DEFAULT_USER_ID)
+        return json.dumps(
+            {"user_id": identity.user_id, "device_id": identity.device_id},
+            ensure_ascii=False,
+        )
+
+    @server.tool(description="Return the capabilities and configuration summary of this server.")
+    def get_server_capabilities(ctx: Context | None = None) -> str:
+        """Return a summary of what this server supports."""
+        return json.dumps(
+            {
+                "auth_mode": "device_token",
+                "supports_cli": True,
+                "supports_plugin": True,
+                "supports_skill": True,
+                "default_user_id": ENV_DEFAULT_USER_ID,
+                "memory_adapter_initialized": _memory_adapter is not None,
+            },
+            ensure_ascii=False,
+        )
 
     # ------------------------------------------------------------------
     # Prompt

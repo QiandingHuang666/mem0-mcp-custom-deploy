@@ -270,12 +270,10 @@ class LocalMemoryAdapter:
 
     # ---- users (compatibility stub) ----------------------------------------
 
-    def users(self) -> List[Dict[str, Any]]:
-        """The local Memory does not maintain a separate user registry.
-        Return a sensible default so callers don't break.
-        """
-        default_user = os.getenv("MEM0_DEFAULT_USER_ID", "mem0-mcp")
-        return [{"id": default_user, "name": default_user}]
+    def users(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Return only the resolved user scope for compatibility callers."""
+        effective_user = user_id or os.getenv("MEM0_DEFAULT_USER_ID", "mem0-mcp")
+        return [{"id": effective_user, "name": effective_user}]
 
     # ---- delete_users (maps to delete_all) ---------------------------------
 

@@ -1,9 +1,8 @@
-"""In-memory OAuth 2.1 Authorization Server for the MCP server.
+"""Legacy in-memory OAuth helper retained for compatibility.
 
-Provides a minimal OAuthAuthorizationServerProvider implementation that:
-- Loads a pre-configured client from environment variables
-- Stores authorization codes, access tokens and refresh tokens in memory
-- Supports disabling OAuth entirely via OAUTH_DISABLED=true
+Current first-version auth direction is `device token + TLS`, implemented in
+`device_tokens.py`. This module is now legacy-only and is no longer the primary
+server authentication path.
 """
 
 from __future__ import annotations

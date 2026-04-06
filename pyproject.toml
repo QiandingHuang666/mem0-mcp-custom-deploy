@@ -1,7 +1,7 @@
 [project]
 name = "mem0-mcp-server"
 version = "0.1.0"
-description = "Mem0 MCP Server - local deployment with OAuth"
+description = "Mem0 MCP Server - local deployment with device token auth"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -13,6 +13,7 @@ dependencies = [
 
 [project.scripts]
 mem0-mcp-server = "mem0_mcp_server.server:main"
+mem-cli = "mem0_mcp_server.cli:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -20,6 +21,14 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mem0_mcp_server"]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
 
 [tool.uv]
 package = true

@@ -9,7 +9,7 @@
 ┌──────────────────┐    HTTP/SSE     ┌──────────────────────┐
 │  MCP Client      │────────────────>│  mem0-mcp-server     │
 │  (本地/远程)      │                 │  (streamable-http)   │
-└──────────────────┘                 │  + OAuth 2.1         │
+└──────────────────┘                 │  + Device Token Auth         │
                                      └──────────┬───────────┘
                                                 │
                           ┌─────────────────────┼────────────────┐
@@ -23,7 +23,7 @@
 - **LLM**: 智谱AI GLM-4.7（通过 OpenAI 兼容 API）
 - **Embedder**: Ollama + nomic-embed-text（本地，768 维）
 - **Vector Store**: Qdrant（本地二进制）
-- **认证**: OAuth 2.1（可禁用，适合本地/内网）
+- **认证**: Device Token（主路径）；远程暴露时建议再配合 TLS
 
 ## 工具列表
 
@@ -87,13 +87,13 @@ qdrant --storage-path ./storage &
 **stdio 模式**（本地 Claude Code 直接使用）：
 
 ```bash
-OAUTH_DISABLED=true uv run python -m mem0_mcp_server.server
+# device token auth is enabled by default uv run python -m mem0_mcp_server.server
 ```
 
 **HTTP 模式**（供远程设备连接）：
 
 ```bash
-OAUTH_DISABLED=true MCP_PORT=8081 uv run python -m mem0_mcp_server.http_entry
+# device token auth is enabled by default MCP_PORT=8081 uv run python -m mem0_mcp_server.http_entry
 ```
 
 ## 配置 Claude Code
@@ -104,13 +104,13 @@ OAUTH_DISABLED=true MCP_PORT=8081 uv run python -m mem0_mcp_server.http_entry
 claude mcp add mem0 -- uv run --directory /path/to/mem0-mcp-custom-deploy python -m mem0_mcp_server.server
 ```
 
-需在 MCP 配置中设置环境变量 `OAUTH_DISABLED=true`。
+需在 MCP 配置中设置环境变量 `# device token auth is enabled by default`。
 
 ### 本地使用（HTTP）
 
 ```bash
 # 先启动 HTTP server
-OAUTH_DISABLED=true uv run python -m mem0_mcp_server.http_entry
+# device token auth is enabled by default uv run python -m mem0_mcp_server.http_entry
 
 # 添加 MCP 连接
 claude mcp add --transport http mem0 http://localhost:8081/mcp
@@ -118,11 +118,18 @@ claude mcp add --transport http mem0 http://localhost:8081/mcp
 
 ### 远程设备使用
 
-通过云服务器反向代理暴露后：
+通过云服务器反向代理暴露后，主认证仍是 device-token；若走公网，建议同时启用 TLS：
 
 ```bash
 claude mcp add --transport http mem0 https://your-domain.com/mcp
 ```
+
+### Claude plugin / skill 接入约定
+
+- Claude plugin、skill 和 CLI 应共享同一个 mem server，而不是分别直连底层 `mem0` 或 `LocalMemoryAdapter`
+- Claude 集成层应通过统一 client / server 契约访问能力，避免出现专有私有数据路径
+- 第一阶段主认证模式为 `device token`；公网部署建议额外配合 `TLS`
+- CLI、plugin、skill 都以 server 公开的 capability / identity 工具和摘要为准
 
 ## systemd 服务（统一管理）
 
@@ -151,11 +158,9 @@ sudo systemctl enable mem0-stack
 |------|--------|------|
 | `ZHIPUAI_API_KEY` | - | 智谱AI API Key（必须） |
 | `MEM0_DEFAULT_USER_ID` | `mem0-mcp` | 默认用户 ID |
-| `OAUTH_DISABLED` | `false` | 设为 `true` 禁用认证 |
-| `OAUTH_ISSUER_URL` | `http://localhost:8081` | OAuth Issuer URL |
+| `MEM0_DEFAULT_USER_ID` | `mem0-mcp` | 默认用户 ID |
+| `DEVICE_TOKEN` | - | 设备令牌（由 server 签发/管理） |
 | `MCP_SERVER_URL` | `http://localhost:8081` | MCP Server URL |
-| `OAUTH_CLIENT_ID` | `mem0-mcp-client` | OAuth 客户端 ID |
-| `OAUTH_CLIENT_SECRET` | `changeme` | OAuth 客户端密钥 |
 | `MCP_HOST` | `0.0.0.0` | HTTP 监听地址 |
 | `MCP_PORT` | `8081` | HTTP 监听端口 |
 | `QDRANT_PATH` | `./storage` | Qdrant 数据目录 |
@@ -169,7 +174,7 @@ sudo systemctl enable mem0-stack
 │   ├── server.py                  # MCP Server 主入口
 │   ├── http_entry.py              # HTTP 模式入口
 │   ├── local_memory.py            # MemoryClient → Memory 适配层
-│   ├── auth_server.py             # OAuth 2.1 Authorization Server
+│   ├── auth_server.py             # 旧 OAuth 兼容辅助模块（非主路径）
 │   └── schemas.py                 # Pydantic 模型
 ├── mem0-stack.sh                  # systemd wrapper 脚本
 ├── mem0-stack.service             # systemd unit 文件

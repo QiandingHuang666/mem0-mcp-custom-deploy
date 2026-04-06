@@ -1,30 +1,33 @@
-import os
 from mem0 import Memory
+
+from mem0_mcp_server.server_config import load_server_config
+
+cfg = load_server_config()
 
 config = {
     "llm": {
-        "provider": "openai",
+        "provider": cfg.llm_provider,
         "config": {
-            "api_key": os.environ["ZHIPUAI_API_KEY"],
-            "model": "glm-4.7",
-            "openai_base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-        }
+            "api_key": cfg.llm_api_key,
+            "model": cfg.llm_model,
+            "openai_base_url": cfg.llm_endpoint,
+        },
     },
     "embedder": {
-        "provider": "ollama",
+        "provider": cfg.embedding_provider,
         "config": {
-            "model": "nomic-embed-text",
-            "ollama_base_url": "http://localhost:11434",
-        }
+            "model": cfg.embedding_model,
+            "ollama_base_url": cfg.embedding_endpoint,
+        },
     },
     "vector_store": {
-        "provider": "qdrant",
+        "provider": cfg.vector_store_provider,
         "config": {
-            "host": "localhost",
-            "port": 6333,
-            "embedding_model_dims": 768,
-        }
-    }
+            "host": cfg.qdrant_host,
+            "port": cfg.qdrant_port,
+            "embedding_model_dims": cfg.embedding_model_dims,
+        },
+    },
 }
 
 memory = Memory.from_config(config)
